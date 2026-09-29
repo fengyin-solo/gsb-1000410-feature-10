@@ -1,8 +1,13 @@
-"""车辆调度业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""车辆调度业务规则：状态流转、字段校验与筛选口径都收在这里。
+
+车辆上的「制冷机组状态」不允许在本模块私自维护：统一从制冷机组模块投影过来，
+保证机组列表、车辆详情、调度画面看到的同一机组状态完全一致。
+"""
 from __future__ import annotations
 
 from typing import Any
 
+from app.services.reefer_unit import vehicle_reefer_status
 from app.store import store
 
 MODULE = "vehicle"
@@ -26,12 +31,16 @@ class VehicleService:
             rows = [row for row in rows if keyword in str(row.get("车辆编号", ""))]
         if status:
             rows = [row for row in rows if row.get("status") == status]
-        total = len(rows)
+        projected = [self._with_reefer(row) for row in rows]
+        total = len(projected)
         start = max(page - 1, 0) * size
-        return rows[start:start + size], total
+        return projected[start:start + size], total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
-        return store.find(MODULE, entry_id)
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None
+        return self._with_reefer(entry)
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
@@ -44,7 +53,7 @@ class VehicleService:
         entry["pending"] = True
         entry["abnormal"] = False
         rows.append(entry)
-        return entry, []
+        return self._with_reefer(entry), []
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
@@ -58,4 +67,12 @@ class VehicleService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
-        return entry, f"冷藏车辆已{action}"
+        return self._with_reefer(entry), f"冷藏车辆已{action}"
+
+    def _with_reefer(self, vehicle: dict[str, Any]) -> dict[str, Any]:
+        """以制冷机组模块为唯一事实来源，覆盖车辆上缓存的机组状态。"""
+        view = dict(vehicle)
+        reefer = vehicle_reefer_status(str(vehicle.get("车辆编号", "")))
+        view["制冷机组状态"] = reefer["制冷机组状态"]
+        view["最近保养结论"] = reefer["最近保养结论"]
+        return view
